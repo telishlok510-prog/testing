@@ -171,14 +171,52 @@ export async function POST(request: Request) {
     const historyContext = buildConversationHistory(conversationHistory || []);
     const fullPrompt = `${historyContext}\n\nUser: ${message.trim()}`;
 
-    const response = await genai.models.generateContent({
-      model: "gemini-1.5-flash",
-      contents: fullPrompt,
-      config: {
-        systemInstruction: buildChatSystemPrompt(lang),
-        maxOutputTokens: 2048,
-      },
-    });
+    // Try multiple models with timeout
+    const models = [
+      process.env.GEMINI_MODEL || "gemini-3.5-flash",
+      "gemini-3.5-flash",
+      "gemini-3.6-flash",
+    ];
+    
+    let response: any = null;
+    let successModel = "";
+    let lastError: any = null;
+
+    for (const model of models) {
+      try {
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('timeout')), 15000)
+        );
+        
+        const apiPromise = genai.models.generateContent({
+          model,
+          contents: fullPrompt,
+          config: {
+            systemInstruction: buildChatSystemPrompt(lang),
+            maxOutputTokens: 2048,
+          },
+        });
+
+        response = await Promise.race([apiPromise, timeoutPromise]);
+        successModel = model;
+        break;
+      } catch (modelErr: any) {
+        lastError = modelErr;
+        const status = modelErr?.status;
+        console.warn(`[ChatAssistant] Model ${model} failed with status ${status}`);
+        
+        // If 403/404/503/timeout, try next model
+        if (status === 403 || status === 404 || status === 503 || modelErr.message === 'timeout') {
+          continue;
+        }
+        // Other errors also try next
+        continue;
+      }
+    }
+
+    if (!response) {
+      throw lastError || new Error("All models failed");
+    }
 
     if (!response || !response.text) {
       throw new Error("Empty response from AI");
@@ -189,7 +227,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       success: true,
       response: responseText,
-      model: "gemini-1.5-flash",
+      model: successModel,
     });
   } catch (err: any) {
     console.error("[ChatAssistant] AI error:", err);

@@ -373,43 +373,70 @@ export async function analyzeWithAI(
     : "No strong rule-based signals were detected.";
 
   const fallback = heuristicAnalyze(kind, text, language);
-  const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
+  
+  // Try multiple models in order - some work better with free-tier keys
+  const models = [
+    process.env.GEMINI_MODEL || "gemini-3.5-flash",
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
+    "gemini-2.5-flash",
+  ];
+  const uniqueModels = [...new Set(models)];
 
   let lastErr: unknown;
 
-  // Try each key in rotated order. On 429 (rate limit) move to the next key
-  // immediately — no point retrying the same exhausted key. On any other
-  // error, stop and fall back to heuristics right away.
-  for (let i = 0; i < keys.length; i++) {
-    const apiKey = keys[i];
-    // TEMPORARY DEBUG LOG — shows which key SLOT is being tried (never the
-    // key value itself) so we can see exactly how far the loop gets.
-    console.log(`[RakshakAI][DEBUG] Trying key #${i + 1} of ${keys.length}...`);
-    try {
-      const parsed = await callGeminiOnce(apiKey, model, kind, text, language, signalHint);
-      console.log(`[RakshakAI][DEBUG] Key #${i + 1} succeeded.`);
-      if (!parsed) return fallback; // model responded but gave unusable output
-      return toAnalysisResult(parsed, fallback, "gemini");
-    } catch (e: unknown) {
-      lastErr = e;
-      const status = (e as { status?: number }).status;
-      const message = e instanceof Error ? e.message : String(e);
-
-      // TEMPORARY DEBUG LOG — full error detail for this specific key.
-      console.error(
-        `[RakshakAI][DEBUG] Key #${i + 1} FAILED. status=${status} message=${message}`
-      );
-
-      if (status === 429) {
-        console.warn(
-          `[RakshakAI] Key #${i + 1} rate-limited (429), trying next key...`
+  // Try each model with each key - with timeout protection
+  for (const model of uniqueModels) {
+    for (let i = 0; i < keys.length; i++) {
+      const apiKey = keys[i];
+      console.log(`[RakshakAI][DEBUG] Trying model ${model} with key #${i + 1}...`);
+      
+      try {
+        // Add timeout protection (15 seconds max)
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('API timeout after 15s')), 15000)
         );
-        continue; // try next key in the list
-      }
+        
+        const apiPromise = callGeminiOnce(apiKey, model, kind, text, language, signalHint);
+        const parsed = await Promise.race([apiPromise, timeoutPromise]) as any;
+        
+        console.log(`[RakshakAI][DEBUG] Key #${i + 1} with ${model} succeeded.`);
+        if (!parsed) return fallback;
+        return toAnalysisResult(parsed, fallback, "gemini");
+      } catch (e: unknown) {
+        lastErr = e;
+        const status = (e as { status?: number }).status;
+        const message = e instanceof Error ? e.message : String(e);
 
-      // Non-rate-limit error (network issue, invalid key, etc.) — no point
-      // hammering every remaining key with the same request, fall back now.
-      break;
+        console.error(
+          `[RakshakAI][DEBUG] Key #${i + 1} with ${model} FAILED. status=${status}`
+        );
+
+        // For 403/429 (permission/rate-limit), try next key
+        if (status === 403 || status === 429) {
+          console.warn(
+            `[RakshakAI] Key #${i + 1} blocked (${status}), trying next key...`
+          );
+          continue;
+        }
+
+        // For 404/503, try next model
+        if (status === 404 || status === 503) {
+          console.warn(
+            `[RakshakAI] Model ${model} unavailable (${status}), trying different model...`
+          );
+          break; // Try next model
+        }
+
+        // Timeout or other error - try next key
+        if (message.includes('timeout')) {
+          console.warn(`[RakshakAI] Key #${i + 1} timed out, trying next key...`);
+          continue;
+        }
+
+        // Unknown error - try next key anyway
+        continue;
+      }
     }
   }
 
@@ -444,52 +471,64 @@ export async function analyzeImageWithAI(
     : "No strong rule-based signals were detected.";
 
   const fallback = heuristicAnalyze(kind, text, language);
-  const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
+  
+  const models = [
+    process.env.GEMINI_MODEL || "gemini-3.5-flash",
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
+    "gemini-2.5-flash",
+  ];
+  const uniqueModels = [...new Set(models)];
 
   let lastErr: unknown;
 
-  for (let i = 0; i < keys.length; i++) {
-    const apiKey = keys[i];
-    console.log(
-      `[RakshakAI][DEBUG][Image] Trying key #${i + 1} of ${keys.length}...`
-    );
-    try {
-      const parsed = await callGeminiImageOnce(
-        apiKey,
-        model,
-        kind,
-        text,
-        imageBase64,
-        mimeType,
-        language,
-        signalHint
+  for (const model of uniqueModels) {
+    for (let i = 0; i < keys.length; i++) {
+      const apiKey = keys[i];
+      console.log(
+        `[RakshakAI][DEBUG][Image] Trying model ${model} with key #${i + 1}...`
       );
-      console.log(`[RakshakAI][DEBUG][Image] Key #${i + 1} succeeded.`);
-      if (!parsed) return fallback;
-      return toAnalysisResult(parsed, fallback, "gemini");
-    } catch (e: unknown) {
-      lastErr = e;
-      const status = (e as { status?: number }).status;
-      const message = e instanceof Error ? e.message : String(e);
-
-      console.error(
-        `[RakshakAI][DEBUG][Image] Key #${i + 1} FAILED. status=${status} message=${message}`
-      );
-
-      if (status === 429) {
-        console.warn(
-          `[RakshakAI][Image] Key #${i + 1} rate-limited (429), trying next key...`
+      
+      try {
+        // Add timeout protection
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('API timeout after 20s')), 20000)
         );
+        
+        const apiPromise = callGeminiImageOnce(apiKey, model, kind, text, imageBase64, mimeType, language, signalHint);
+        const parsed = await Promise.race([apiPromise, timeoutPromise]) as any;
+        
+        console.log(`[RakshakAI][DEBUG][Image] Key #${i + 1} with ${model} succeeded.`);
+        if (!parsed) return fallback;
+        return toAnalysisResult(parsed, fallback, "gemini");
+      } catch (e: unknown) {
+        lastErr = e;
+        const status = (e as { status?: number }).status;
+
+        console.error(
+          `[RakshakAI][DEBUG][Image] Key #${i + 1} with ${model} FAILED. status=${status}`
+        );
+
+        if (status === 403 || status === 429) {
+          console.warn(
+            `[RakshakAI][Image] Key #${i + 1} blocked (${status}), trying next key...`
+          );
+          continue;
+        }
+
+        if (status === 404 || status === 503) {
+          console.warn(
+            `[RakshakAI][Image] Model ${model} unavailable (${status}), trying different model...`
+          );
+          break;
+        }
+
         continue;
       }
-      break;
     }
   }
 
-  console.error(
-    "[RakshakAI][Image] All Gemini keys failed, using fallback:",
-    lastErr
-  );
+  console.error("[RakshakAI][Image] All Gemini keys failed, using fallback:", lastErr);
   return fallback;
 }
 
@@ -518,7 +557,7 @@ export async function analyzeReportForAlert(
     return createFallbackReportAnalysis(reportText, language);
   }
 
-  const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
+  const model = process.env.GEMINI_MODEL || "gemini-3.5-flash";
   const systemPrompt = buildReportAnalysisSystemPrompt(language);
   const userPrompt = buildReportAnalysisUserPrompt(reportText, language);
 

@@ -80,7 +80,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
+  const model = process.env.GEMINI_MODEL || "gemini-3.5-flash";
   let lastErr: unknown;
 
   // Try each key in rotated order, same pattern as analyzeWithAI in lib/ai.ts.
